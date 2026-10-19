@@ -1,0 +1,51 @@
+name: Бот — ответы на сообщения
+
+on:
+  schedule:
+    # Проверка новых сообщений каждые 5 минут.
+    # Если репозиторий приватный — поменяй на "*/30 * * * *", иначе закончатся бесплатные минуты.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:        # кнопка для ручного запуска
+
+# чтобы два запуска не шли одновременно и не отвечали дважды
+concurrency:
+  group: bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write           # чтобы сохранять state.json (что бот уже сделал)
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      OWNER_ID: ${{ secrets.OWNER_ID }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RATE_MULTIPLIER: ${{ secrets.RATE_MULTIPLIER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Есть ли новые сообщения
+        id: check
+        run: python bot.py check >> "$GITHUB_OUTPUT"
+      - name: Установить библиотеки
+        if: steps.check.outputs.new == '1'
+        run: pip install -r requirements.txt
+      - name: Ответить
+        if: steps.check.outputs.new == '1'
+        run: python bot.py poll
+      - name: Сохранить состояние
+        if: always() && steps.check.outputs.new == '1'
+        run: |
+          git config user.name "pluxury-bot"
+          git config user.email "pluxury-bot@users.noreply.github.com"
+          git add state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Состояние бота"
+            git pull --rebase
+            git push
+          fi
