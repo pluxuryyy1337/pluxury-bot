@@ -8,13 +8,18 @@ import style
 
 MODEL = "claude-opus-5-5"
 
+# Сервер, через который идут запросы к Claude.
+# Сейчас — посредник aiprimetech. Для официального Claude поставь BASE_URL = None.
+BASE_URL = "https://aiprimetech.io"
+
 _client = None
 
 
 def client():
     global _client
     if _client is None:
-        _client = anthropic.Anthropic()  # ключ берётся из ANTHROPIC_API_KEY
+        # ключ берётся из ANTHROPIC_API_KEY
+        _client = anthropic.Anthropic(base_url=BASE_URL) if BASE_URL else anthropic.Anthropic()
     return _client
 
 
@@ -23,20 +28,33 @@ def ask(system, user, effort="medium", schema=None, max_tokens=16000):
     output_config = {"effort": effort}
     if schema:
         output_config["format"] = {"type": "json_schema", "schema": schema}
-    resp = client().beta.messages.create(
+    if schema:
+        system += ("\n\nОтветь только JSON-объектом по этой схеме, без пояснений:\n"
+                   + json.dumps(schema, ensure_ascii=False))
+    params = dict(
         model=MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
         output_config=output_config,
-        # если Claude откажется отвечать, запрос сам повторится на другой модели
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
     )
+    if BASE_URL:
+        # посредник может не знать бета-функций, поэтому шлём обычный запрос
+        resp = client().messages.create(**params)
+    else:
+        # если Claude откажется отвечать, запрос сам повторится на другой модели
+        resp = client().beta.messages.create(
+            **params, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude отказался отвечать на этот запрос")
     text = "".join(b.text for b in resp.content if b.type == "text").strip()
-    return json.loads(text) if schema else text
+    if not schema:
+        return text
+    # на случай, если сервер вернул JSON в обёртке ```json ... ``` или с текстом вокруг
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < 0:
+        raise RuntimeError(f"Claude ответил не в том формате: {text[:300]}")
+    return json.loads(text[start:end + 1])
 
 
 def _obj(props):
