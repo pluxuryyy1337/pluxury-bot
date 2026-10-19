@@ -65,7 +65,9 @@ def usd_rate():
                 errors.append(f"{source.__name__}: {e}")
         else:
             raise RuntimeError("Не удалось узнать курс доллара: " + "; ".join(errors))
-        _cache["rate"] = rate * float(os.environ.get("RATE_MULTIPLIER", "1"))
+        # если секрета RATE_MULTIPLIER нет, GitHub передаёт пустую строку — тогда поправки нет
+        multiplier = (os.environ.get("RATE_MULTIPLIER") or "1").replace(",", ".")
+        _cache["rate"] = rate * float(multiplier)
     return _cache["rate"]
 
 
