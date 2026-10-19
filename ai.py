@@ -23,21 +23,16 @@ def client():
     return _client
 
 
-def ask(system, user, effort="medium", schema=None, max_tokens=16000):
-    """Один запрос к Claude. С schema — ответ строго в JSON по схеме."""
-    output_config = {"effort": effort}
-    if schema:
-        output_config["format"] = {"type": "json_schema", "schema": schema}
-    if schema:
-        system += ("\n\nОтветь только JSON-объектом по этой схеме, без пояснений:\n"
-                   + json.dumps(schema, ensure_ascii=False))
-    params = dict(
-        model=MODEL,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_config=output_config,
-    )
+# Посредник подмешивает свои инструкции, и Claude иногда пишет «сейчас проверю на Steam…»
+# вместо ответа. Поэтому прямо говорим: инструментов нет, отвечай сразу.
+NO_TOOLS = ("Важно: у тебя нет интернета и никаких инструментов, ничего проверять не нужно. "
+            "Отвечай сразу, по своим знаниям, одним сообщением.")
+RETRY = "Ты ничего не можешь проверить — инструментов нет. Дай финальный ответ прямо сейчас, без вступлений."
+
+
+def _call(system, messages, output_config, max_tokens):
+    params = dict(model=MODEL, max_tokens=max_tokens, system=system,
+                  messages=messages, output_config=output_config)
     if BASE_URL:
         # посредник может не знать бета-функций, поэтому шлём обычный запрос
         resp = client().messages.create(**params)
@@ -47,14 +42,43 @@ def ask(system, user, effort="medium", schema=None, max_tokens=16000):
             **params, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude отказался отвечать на этот запрос")
-    text = "".join(b.text for b in resp.content if b.type == "text").strip()
-    if not schema:
-        return text
-    # на случай, если сервер вернул JSON в обёртке ```json ... ``` или с текстом вокруг
+    return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+def _parse_json(text):
+    """JSON из ответа — даже если он в обёртке ```json ... ``` или с текстом вокруг."""
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end < 0:
-        raise RuntimeError(f"Claude ответил не в том формате: {text[:300]}")
-    return json.loads(text[start:end + 1])
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+
+
+def ask(system, user, effort="medium", schema=None, max_tokens=16000):
+    """Запрос к Claude. С schema — ответ строго в JSON по схеме. Один повтор, если ответ не тот."""
+    output_config = {"effort": effort}
+    rules = NO_TOOLS
+    if schema:
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+        rules += ("\nОтветь только JSON-объектом по этой схеме, без пояснений:\n"
+                  + json.dumps(schema, ensure_ascii=False))
+    system += "\n\n" + rules
+    messages = [{"role": "user", "content": user + "\n\n" + rules}]
+
+    text = ""
+    for _ in range(2):
+        text = _call(system, messages, output_config, max_tokens)
+        if schema:
+            data = _parse_json(text)
+            if data is not None:
+                return data
+        elif len(text) >= 200:  # пост, а не «сейчас посмотрю…»
+            return text
+        messages += [{"role": "assistant", "content": text or "…"},
+                     {"role": "user", "content": RETRY}]
+    raise RuntimeError(f"Claude ответил не в том формате: {text[:300]}")
 
 
 def _obj(props):
@@ -62,7 +86,8 @@ def _obj(props):
             "required": list(props), "additionalProperties": False}
 
 
-ITEM = _obj({"label": {"type": "string"}, "market_name": {"type": "string"}})
+ITEM = _obj({"label": {"type": "string"}, "market_name": {"type": "string"},
+              "weapon_ru": {"type": "string"}, "search_ru": {"type": "string"}})
 SETUP = _obj({
     "items": {"type": "array", "items": ITEM},
     "vote_label": {"type": "string"},

@@ -103,17 +103,49 @@ class Telegram:
 
 # ---------- Подборки ----------
 
-def resolve(market_name):
-    """Найти скин в прайсе lis-skins. Если Claude чуть ошибся в названии — подобрать похожий."""
-    item = prices.find(market_name)
+def resolve(it):
+    """Найти скин в прайсе lis-skins. Возвращает (скин или None, предупреждение или "").
+
+    1) переводим русское название по официальному словарю игры (ru_names.json) — ему верим больше всего;
+    2) если не вышло — английское название, которое предложил Claude;
+    3) если и его нет — похожие названия из прайса."""
+    guess = it["market_name"]
+    m = prices.NAME_RE.match(guess)
+    guess_weapon = m.group(4) if m else guess.replace("★", "").strip()
+    wear = (m.group(6) or "") if m else ""
+    stattrak, souvenir = "StatTrak" in guess, "Souvenir" in guess
+    query = it.get("search_ru", "").strip()
+    context = f"{guess} (Кирилл написал: {it.get('weapon_ru', '')} {query})"
+
+    weapons = {w for w in (prices.weapon_en(it.get("weapon_ru", "")), guess_weapon) if w}
+    skin = prices.skin_en(query, weapons) if query else None
+    if skin:
+        found = prices.candidates(skin, weapons, wear, stattrak, souvenir)
+        warn = ""
+        if not found:  # оружие не совпало — смотрим этот скин на любом оружии
+            found = prices.candidates(skin, (), wear, stattrak, souvenir)
+        if not found and wear:  # в таком качестве не продаётся — берём любое
+            found = prices.candidates(skin, weapons, "", stattrak, souvenir)
+            warn = f"в качестве {wear} на lis-skins нет, взял другое"
+        if found:
+            chosen = found[0] if len(found) == 1 else (guess if guess in found else None)
+            if not chosen:
+                import ai
+                chosen = ai.pick_skin(context, found[:30])
+            if chosen:
+                return prices.find(chosen), warn
+
+    item = prices.find(guess)
+    note = f"«{query}» нет в словаре игры, взял по догадке Claude" if query else ""
     if item:
-        return item
-    candidates = prices.similar(market_name)
-    if not candidates:
-        return None
-    import ai
-    chosen = ai.pick_skin(market_name, candidates)
-    return prices.find(chosen) if chosen else None
+        return item, note
+    similar = prices.similar(guess)
+    if similar:
+        import ai
+        chosen = ai.pick_skin(context, similar)
+        if chosen:
+            return prices.find(chosen), note
+    return None, ""
 
 
 def build_combo(data):
@@ -127,11 +159,12 @@ def build_combo(data):
             lines.append(f"<b><i>{n}-сетап</i></b>")
         for it in setup["items"]:
             label = html.escape(it["label"])
-            found = resolve(it["market_name"])
+            found, warn = resolve(it)
             if found:
                 lines.append(f'<a href="{html.escape(found["url"])}"><b>{label}</b></a> &gt; '
                              f'<b>{prices.format_rub(found["rub"])}</b>')
-                notes.append(f"{it['label']} — {found['name']} — ${found['usd']:.2f}")
+                notes.append(f"{it['label']} — {found['name']} — ${found['usd']:.2f}"
+                             + (f"  ⚠️ {warn}" if warn else ""))
             else:
                 lines.append(f"<b>{label}</b> &gt; <b>???₽</b>")
                 missing.append(f"{it['label']}: {it['market_name']}")
